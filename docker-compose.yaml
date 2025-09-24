@@ -1,0 +1,40 @@
+version: "3.9"
+
+networks:
+  appnet:
+    driver: bridge
+
+services:
+  cfssl:
+    image: cfssl/cfssl:latest
+    restart: always
+    networks:
+      - appnet
+    volumes:
+      - ./cfssl_data:/etc/cfssl
+    ports:
+      - "8888:8888"
+    command: >
+      serve
+      -ca=/etc/cfssl/root_ca.pem
+      -ca-key=/etc/cfssl/root_ca-key.pem
+      -config=/etc/cfssl/signing_config.json
+      -address=0.0.0.0
+      -port=8888
+
+  api:
+    image: python:3.11-slim
+    working_dir: /workspace/backend
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
+    environment:
+      - CFSSL_ENDPOINT=http://cfssl:8888/api/v1/cfssl/newcert
+      - CORS_ALLOW_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
+    volumes:
+      - ./:/workspace
+    ports:
+      - "8000:8000"
+    depends_on:
+      - cfssl
+    networks:
+      - appnet

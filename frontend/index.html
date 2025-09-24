@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>内部证书管理系统</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@3.3.7/dist/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
+    <style>
+        body { padding: 30px; }
+        pre { white-space: pre-wrap; word-break: break-all; }
+        .panel-heading { font-weight: bold; }
+        .table-actions button { margin-right: 6px; }
+    </style>
+</head>
+<body>
+<div id="app" class="container-fluid">
+    <div class="row">
+        <div class="col-lg-12">
+            <div class="panel panel-primary">
+                <div class="panel-heading clearfix">
+                    <span class="pull-left">SSL 证书列表</span>
+                    <button class="btn btn-success btn-sm pull-right" @click="openIssueModal">
+                        <span class="glyphicon glyphicon-plus"></span> 签发新证书
+                    </button>
+                </div>
+                <div class="panel-body">
+                    <div v-if="loading" class="text-muted">加载中...</div>
+                    <div v-if="error" class="alert alert-danger">{{ error }}</div>
+                    <div class="table-responsive" v-if="certs.length">
+                        <table class="table table-striped table-hover">
+                            <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>CN</th>
+                                <th>SAN</th>
+                                <th>签发时间</th>
+                                <th>到期时间</th>
+                                <th>有效期</th>
+                                <th>状态</th>
+                                <th class="text-right">操作</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            <tr v-for="cert in certs" :key="cert.id">
+                                <td>{{ cert.id }}</td>
+                                <td>{{ cert.cn }}</td>
+                                <td>{{ cert.sans.join(', ') }}</td>
+                                <td>{{ formatDate(cert.issued_at) }}</td>
+                                <td>{{ formatDate(cert.expires_at) }}</td>
+                                <td>{{ formatValidity(cert) }}</td>
+                                <td>
+                                    <span class="label" :class="cert.status === 'valid' ? 'label-success' : 'label-default'">{{ cert.status }}</span>
+                                </td>
+                                <td class="text-right table-actions">
+                                    <button class="btn btn-xs btn-info" @click="showDetails(cert)">详情</button>
+                                    <button class="btn btn-xs btn-primary" @click="downloadPem(cert)">下载 PEM</button>
+                                    <button class="btn btn-xs btn-warning" @click="downloadP12(cert)">下载 P12</button>
+                                </td>
+                            </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div v-else class="text-muted">暂无证书记录，请先签发新的证书。</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 详情 Panel -->
+    <div class="row" v-if="activeCert">
+        <div class="col-lg-12">
+            <div class="panel panel-default">
+                <div class="panel-heading">证书详情 (ID: {{ activeCert.id }})</div>
+                <div class="panel-body">
+                    <p><strong>CN：</strong>{{ activeCert.cn }}</p>
+                    <p><strong>SAN：</strong>{{ activeCert.sans.join(', ') }}</p>
+                    <p><strong>序列号：</strong>{{ activeCert.serial_number || '无' }}</p>
+                    <p><strong>Profile：</strong>{{ activeCert.profile || '默认' }}</p>
+                    <p><strong>有效期：</strong>{{ formatValidity(activeCert) }}</p>
+                    <div>
+                        <strong>证书 PEM：</strong>
+                        <pre>{{ activeCert.certificate_pem }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新证书 Modal -->
+    <div class="modal fade" id="issueModal" tabindex="-1" role="dialog" aria-labelledby="issueModalLabel">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <form @submit.prevent="submitForm">
+                    <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                        <h4 class="modal-title" id="issueModalLabel">签发新证书</h4>
+                    </div>
+                    <div class="modal-body">
+                        <div v-if="formError" class="alert alert-danger">{{ formError }}</div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label>CN (Common Name)</label>
+                                    <input v-model="form.cn" type="text" class="form-control" required placeholder="example.internal">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="form-group">
+                                    <label>Profile</label>
+                                    <input v-model="form.profile" type="text" class="form-control" placeholder="可选：server">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="form-group">
+                                    <label>Key Algorithm</label>
+                                    <select v-model="form.key_algo" class="form-control">
+                                        <option value="rsa">RSA</option>
+                                        <option value="ecdsa">ECDSA</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="form-group">
+                                    <label>Key Size</label>
+                                    <input v-model.number="form.key_size" type="number" min="1024" step="1024" class="form-control">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="form-group">
+                                    <label>国家/地区 (C)</label>
+                                    <input v-model="form.country" type="text" class="form-control" placeholder="CN">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="form-group">
+                                    <label>省份 (ST)</label>
+                                    <input v-model="form.province" type="text" class="form-control" placeholder="Hunan">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="form-group">
+                                    <label>城市 (L)</label>
+                                    <input v-model="form.locality" type="text" class="form-control" placeholder="Changsha">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label>证书有效期</label>
+                                    <select v-model="form.validity_option" class="form-control">
+                                        <option value="1y">1 年</option>
+                                        <option value="3y">3 年</option>
+                                        <option value="5y">5 年</option>
+                                        <option value="10y">10 年</option>
+                                        <option value="custom">自定义</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-6" v-if="form.validity_option === 'custom'">
+                                <div class="form-group">
+                                    <label>自定义有效期（天）</label>
+                                    <input v-model.number="form.validity_days" type="number" min="1" class="form-control" placeholder="例如：730">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label>组织 (O)</label>
+                                    <input v-model="form.organization" type="text" class="form-control" placeholder="MyCompany">
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-group">
+                                    <label>部门 (OU)</label>
+                                    <input v-model="form.organizational_unit" type="text" class="form-control" placeholder="IT">
+                                </div>
+                            </div>
+                        </div>
+                        <hr>
+                        <h4>SAN (Subject Alternative Names)</h4>
+                        <p class="text-muted">可为同一证书添加多个 DNS、IP 或其他用途的标识。</p>
+                        <div v-for="(entry, index) in hostEntries" :key="index" class="row" style="margin-bottom: 10px;">
+                            <div class="col-md-3">
+                                <select v-model="entry.type" class="form-control">
+                                    <option value="DNS">DNS</option>
+                                    <option value="IP">IP</option>
+                                    <option value="URI">URI</option>
+                                    <option value="EMAIL">Email</option>
+                                </select>
+                            </div>
+                            <div class="col-md-7">
+                                <input v-model="entry.value" type="text" class="form-control" placeholder="例如：api.internal 或 10.0.0.10">
+                            </div>
+                            <div class="col-md-2">
+                                <button type="button" class="btn btn-default btn-block" @click="removeHost(index)" :disabled="hostEntries.length === 1">
+                                    <span class="glyphicon glyphicon-trash"></span>
+                                </button>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-link" @click="addHost"><span class="glyphicon glyphicon-plus"></span> 添加 SAN</button>
+
+                        <div v-if="formResult" style="margin-top: 20px;">
+                            <div class="alert alert-success">
+                                <strong>证书签发成功！</strong> 请立即下载或保存私钥信息。
+                            </div>
+                            <div class="panel panel-success">
+                                <div class="panel-heading">证书 PEM</div>
+                                <div class="panel-body"><pre>{{ formResult.certificate_pem }}</pre></div>
+                            </div>
+                            <div class="panel panel-warning">
+                                <div class="panel-heading">私钥 PEM</div>
+                                <div class="panel-body"><pre>{{ formResult.private_key_pem }}</pre></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" data-dismiss="modal" :disabled="submitting">关闭</button>
+                        <button type="submit" class="btn btn-primary" :disabled="submitting">
+                            {{ submitting ? '签发中...' : '提交签发' }}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@3.3.7/dist/js/bootstrap.min.js" integrity="sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<script>
+const apiClient = axios.create({ baseURL: '/' });
+
+const createEmptyForm = () => ({
+    cn: '',
+    profile: '',
+    country: '',
+    province: '',
+    locality: '',
+    organization: '',
+    organizational_unit: '',
+    key_algo: 'rsa',
+    key_size: 2048,
+    validity_option: '1y',
+    validity_days: 365
+});
+
+const app = Vue.createApp({
+    data() {
+        return {
+            certs: [],
+            loading: false,
+            error: '',
+            submitting: false,
+            formError: '',
+            formResult: null,
+            activeCert: null,
+            form: createEmptyForm(),
+            hostEntries: [ { type: 'DNS', value: '' } ]
+        };
+    },
+    mounted() {
+        this.loadCerts();
+    },
+    methods: {
+        formatDate(value) {
+            if (!value) { return '-'; }
+            return new Date(value).toLocaleString();
+        },
+        formatValidity(cert) {
+            if (!cert) { return '-'; }
+            const days = Number(cert.validity_days);
+            if (days && !Number.isNaN(days)) {
+                if (days % 365 === 0) {
+                    return (days / 365) + ' 年';
+                }
+                return days + ' 天';
+            }
+            if (cert.issued_at && cert.expires_at) {
+                const issued = new Date(cert.issued_at);
+                const expires = new Date(cert.expires_at);
+                const diffMs = expires - issued;
+                if (diffMs > 0) {
+                    const approxDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+                    return approxDays + ' 天';
+                }
+            }
+            return '-';
+        },
+        loadCerts() {
+            this.loading = true;
+            this.error = '';
+            apiClient.get('certs')
+                .then(res => {
+                    this.certs = res.data;
+                    if (this.activeCert) {
+                        const found = res.data.find(c => c.id === this.activeCert.id);
+                        if (found) {
+                            this.activeCert = found;
+                        }
+                    }
+                })
+                .catch(err => {
+                    this.error = err.response ? (err.response.data.detail || '加载失败') : err.message;
+                })
+                .finally(() => {
+                    this.loading = false;
+                });
+        },
+        openIssueModal() {
+            this.resetForm();
+            this.formError = '';
+            this.formResult = null;
+            $('#issueModal').modal('show');
+        },
+        addHost() {
+            this.hostEntries.push({ type: 'DNS', value: '' });
+        },
+        removeHost(index) {
+            if (this.hostEntries.length === 1) {
+                return;
+            }
+            this.hostEntries.splice(index, 1);
+        },
+        sanitizeHosts() {
+            return this.hostEntries
+                .map(entry => (entry.value || '').trim())
+                .filter(Boolean)
+                .filter((value, index, self) => self.indexOf(value) === index);
+        },
+        submitForm() {
+            if (!this.form.cn.trim()) {
+                this.formError = 'CN 为必填项';
+                return;
+            }
+            if (this.form.validity_option === 'custom') {
+                const days = Number(this.form.validity_days);
+                if (!days || Number.isNaN(days) || days <= 0) {
+                    this.formError = '请填写大于 0 的自定义有效期天数';
+                    return;
+                }
+            }
+            const hosts = this.sanitizeHosts();
+            this.submitting = true;
+            this.formError = '';
+
+            const payload = {
+                cn: this.form.cn.trim(),
+                sans: hosts,
+                profile: this.form.profile || null,
+                country: this.form.country || null,
+                province: this.form.province || null,
+                locality: this.form.locality || null,
+                organization: this.form.organization || null,
+                organizational_unit: this.form.organizational_unit || null,
+                key_algo: this.form.key_algo || 'rsa',
+                key_size: this.form.key_size || 2048,
+                validity_option: this.form.validity_option || '1y',
+                validity_days: this.form.validity_option === 'custom' ? this.form.validity_days : null
+            };
+
+            apiClient.post('certs', payload)
+                .then(res => {
+                    this.formResult = res.data;
+                    this.loadCerts();
+                })
+                .catch(err => {
+                    this.formError = err.response ? (err.response.data.detail || '签发失败') : err.message;
+                })
+                .finally(() => {
+                    this.submitting = false;
+                });
+        },
+        resetForm() {
+            this.form = createEmptyForm();
+            this.hostEntries = [ { type: 'DNS', value: '' } ];
+            this.formResult = null;
+        },
+        showDetails(cert) {
+            this.activeCert = cert;
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        },
+        downloadPem(cert) {
+            window.open(`/certs/${cert.id}/download.pem`, '_blank');
+        },
+        downloadP12(cert) {
+            let pwd = window.prompt('请输入导出 P12 的密码（留空则不设置密码）：');
+            if (pwd === null) {
+                return;
+            }
+            const query = pwd ? `?password=${encodeURIComponent(pwd)}` : '';
+            window.open(`/certs/${cert.id}/download.p12${query}`, '_blank');
+        }
+    }
+});
+
+app.mount('#app');
+</script>
+</body>
+</html>
